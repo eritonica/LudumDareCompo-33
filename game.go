@@ -1,53 +1,145 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image/color"
+	"log"
+	"os"
 	"time"
-	sf "bitbucket.org/krepa098/gosfml2"
+
+	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/audio"
+	"github.com/hajimehoshi/ebiten/v2/audio/vorbis"
+	"github.com/hajimehoshi/ebiten/v2/audio/wav"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 )
 
-type Game struct {
-	RenderWindow *sf.RenderWindow
-	EnemyList []*Enemy
-	EnemyGenerationSpeed int64
-	LastEnemyGenerated int64
-	Player *Player
-	Width uint
-	Height uint
-	ChildsCollected int
-	ChildsCollectedText *sf.Text
-	WelcomeText *sf.Text
-	PlayText *sf.Text
-	StartTime int64
-	EndTime int64
-	TimeText *sf.Text
-	EndingText *sf.Text
-	EndingPointsText *sf.Text
-	RestartText *sf.Text
-	CreditsText *sf.Text
-	State int
-	Font *sf.Font
-	Music *sf.Music
-	Textures []Texture
-	ChildStolen *sf.Music
+const SampleRate = 44100
+
+// Label is a piece of positioned text (replacement for sf.Text).
+type Label struct {
+	Str   string
+	Face  *text.GoTextFace
+	Color color.RGBA
+	X, Y  float64
 }
 
-func NewGame(title string, width uint, height uint, bpp uint, vsync bool) *Game {
+func (this *Label) Width() float64 {
+	w, _ := text.Measure(this.Str, this.Face, 0)
+	return w
+}
+
+func (this *Label) Draw(screen *ebiten.Image) {
+	op := &text.DrawOptions{}
+	op.GeoM.Translate(this.X, this.Y)
+	op.ColorScale.ScaleWithColor(this.Color)
+	text.Draw(screen, this.Str, this.Face, op)
+}
+
+type Game struct {
+	EnemyList            []*Enemy
+	EnemyGenerationSpeed int64
+	LastEnemyGenerated   int64
+	Player               *Player
+	Width                uint
+	Height               uint
+	ChildsCollected      int
+	ChildsCollectedText  *Label
+	WelcomeText          *Label
+	PlayText             *Label
+	StartTime            int64
+	EndTime              int64
+	TimeText             *Label
+	EndingText           *Label
+	EndingPointsText     *Label
+	RestartText          *Label
+	CreditsText          *Label
+	State                int
+	Font                 *text.GoTextFaceSource
+	AudioContext         *audio.Context
+	Music                *audio.Player
+	Textures             []Texture
+	ChildStolen          *audio.Player
+}
+
+func NewGame(width uint, height uint) *Game {
 	Game := new(Game)
 	Game.Width = width
 	Game.Height = height
-	Game.RenderWindow = sf.NewRenderWindow(sf.VideoMode{width, height, bpp}, title, sf.StyleDefault, sf.DefaultContextSettings())
-	Game.RenderWindow.SetVSyncEnabled(vsync)
-	Game.Font, _ = sf.NewFontFromFile("res/fonts/UbuntuMono-R.ttf")
-	Game.State = 0;
+
+	fontData, err := os.ReadFile("res/fonts/UbuntuMono-R.ttf")
+	if err != nil {
+		log.Fatal(err)
+	}
+	Game.Font, err = text.NewGoTextFaceSource(bytes.NewReader(fontData))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	Game.AudioContext = audio.NewContext(SampleRate)
+	Game.Music = Game.loadMusic("res/audio/Child_Service_-_Going_to_steal_your_Kids.ogg")
+	Game.ChildStolen = Game.loadSound("res/audio/childstolen.wav")
+
+	Game.State = 0
 	Game.StartStateInit()
 	Game.Textures = NewTextures("res/images/")
 	return Game
 }
 
-func (this *Game) IsOpen() bool {
-	return this.RenderWindow.IsOpen()
+func (this *Game) loadMusic(path string) *audio.Player {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	stream, err := vorbis.DecodeWithSampleRate(SampleRate, bytes.NewReader(data))
+	if err != nil {
+		log.Fatal(err)
+	}
+	player, err := this.AudioContext.NewPlayer(audio.NewInfiniteLoop(stream, stream.Length()))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return player
 }
+
+func (this *Game) loadSound(path string) *audio.Player {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	stream, err := wav.DecodeWithSampleRate(SampleRate, bytes.NewReader(data))
+	if err != nil {
+		log.Fatal(err)
+	}
+	player, err := this.AudioContext.NewPlayer(stream)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return player
+}
+
+// restart plays a sound from the beginning, like sf.Music.Play on a playing stream.
+func restart(p *audio.Player) {
+	p.Pause()
+	if err := p.SetPosition(0); err != nil {
+		log.Println(err)
+	}
+	p.Play()
+}
+
+func (this *Game) face(size float64) *text.GoTextFace {
+	return &text.GoTextFace{Source: this.Font, Size: size}
+}
+
+func (this *Game) centered(str string, size float64, c color.RGBA, y float64) *Label {
+	l := &Label{Str: str, Face: this.face(size), Color: c, Y: y}
+	l.X = (float64(this.Width) - l.Width()) / 2
+	return l
+}
+
+var black = color.RGBA{0, 0, 0, 255}
 
 func (this *Game) GameStateInit() {
 	this.Player = NewPlayer(int(this.Width), int(this.Height), this.Textures)
@@ -56,169 +148,75 @@ func (this *Game) GameStateInit() {
 	this.LastEnemyGenerated = time.Now().UnixNano()
 	this.EnemyGenerationSpeed = 500000000
 	this.ChildsCollected = 0
-	this.ChildsCollectedText, _ = sf.NewText(this.Font);
-	this.ChildsCollectedText.SetString(fmt.Sprintf("Childs Collected: %v", this.ChildsCollected))
-	this.ChildsCollectedText.SetCharacterSize(24);
-	this.ChildsCollectedText.SetColor(sf.Color{0,0,0,255})
-	this.ChildsCollectedText.SetPosition(sf.Vector2f{20, 20})
+	this.ChildsCollectedText = &Label{Str: fmt.Sprintf("Childs Collected: %v", this.ChildsCollected), Face: this.face(24), Color: black, X: 20, Y: 20}
 	this.StartTime = time.Now().Unix()
-	this.TimeText, _ = sf.NewText(this.Font);
-	this.TimeText.SetString(fmt.Sprintf("Collection time: %v", time.Now().Unix() - this.StartTime))
-	TimeTextRect := this.TimeText.GetLocalBounds()
-	this.TimeText.SetOrigin(sf.Vector2f{float32(TimeTextRect.Width), 0.0})
-	this.TimeText.SetCharacterSize(24);
-	this.TimeText.SetColor(sf.Color{0,0,0,255})
-	this.TimeText.SetPosition(sf.Vector2f{float32(int(this.Width) - 20), 20})
-	this.Music, _ = sf.NewMusicFromFile("res/audio/Child_Service_-_Going_to_steal_your_Kids.ogg")
-	this.Music.SetLoop(true)
-	this.Music.Play()
-	this.ChildStolen, _ = sf.NewMusicFromFile("res/audio/childstolen.wav")
+	this.TimeText = &Label{Str: fmt.Sprintf("Collection time: %v", time.Now().Unix()-this.StartTime), Face: this.face(24), Color: black, Y: 20}
+	this.TimeText.X = float64(this.Width) - 20 - this.TimeText.Width()
+	restart(this.Music)
 }
 
 func (this *Game) StartStateInit() {
-	this.WelcomeText, _ = sf.NewText(this.Font)
-	this.WelcomeText.SetString(fmt.Sprintf("You work now in Child Service and you must collect every child who has no mother!"))
-	this.WelcomeText.SetCharacterSize(36)
-	this.WelcomeText.SetColor(sf.Color{0,0,0,255})
-	WelcomeTextRect := this.WelcomeText.GetLocalBounds()
-	x := (float32(this.Width) - WelcomeTextRect.Width) / 2
-	this.WelcomeText.SetPosition(sf.Vector2f{x, 250})
+	this.WelcomeText = this.centered("You work now in Child Service and you must collect every child who has no mother!", 36, black, 250)
+	this.PlayText = this.centered("Press Enter to play!", 42, black, 350)
+}
 
-	this.PlayText, _ = sf.NewText(this.Font)
-	this.PlayText.SetString(fmt.Sprintf("Press Enter to play!"))
-	this.PlayText.SetCharacterSize(42)
-	this.PlayText.SetColor(sf.Color{0,0,0,255})
-	PlayTextRect := this.PlayText.GetLocalBounds()
-	x = (float32(this.Width) - PlayTextRect.Width) / 2
-	this.PlayText.SetPosition(sf.Vector2f{x, 350})
+func (this *Game) endStateInit(message string, restartColor color.RGBA) {
+	this.EndTime = time.Now().Unix()
+	this.EndingText = this.centered(message, 36, black, 250)
+	this.EndingPointsText = this.centered(fmt.Sprintf("You collected %v children in %v seconds.", this.ChildsCollected, this.EndTime-this.StartTime), 36, black, 350)
+	this.RestartText = this.centered("Press Enter to restart the game!", 42, restartColor, 450)
+	this.CreditsText = this.centered("Created for Ludum Dare 33 Compo by Toni Korpela!", 42, black, 550)
 }
 
 func (this *Game) KilledStateInit() {
-	this.EndTime = time.Now().Unix()
-	this.EndingText, _ = sf.NewText(this.Font)
-	this.EndingText.SetString(fmt.Sprintf("You were killed by a Father who had a weapon."))
-	this.EndingText.SetCharacterSize(36)
-	this.EndingText.SetColor(sf.Color{0,0,0,255})
-	EndingTextRect := this.EndingText.GetLocalBounds()
-	x := (float32(this.Width) - EndingTextRect.Width) / 2
-	this.EndingText.SetPosition(sf.Vector2f{x, 250})
-
-	this.EndingPointsText, _ = sf.NewText(this.Font)
-	this.EndingPointsText.SetString(fmt.Sprintf("You collected %v children in %v seconds.", this.ChildsCollected, this.EndTime - this.StartTime))
-	this.EndingPointsText.SetCharacterSize(36)
-	this.EndingPointsText.SetColor(sf.Color{0,0,0,255})
-	EndingPointsTextRect := this.EndingPointsText.GetLocalBounds()
-	x = (float32(this.Width) - EndingPointsTextRect.Width) / 2
-	this.EndingPointsText.SetPosition(sf.Vector2f{x, 350})
-
-	this.RestartText, _ = sf.NewText(this.Font)
-	this.RestartText.SetString(fmt.Sprintf("Press Enter to restart the game!"))
-	this.RestartText.SetCharacterSize(42)
-	this.RestartText.SetColor(sf.Color{0,0,0,255})
-	RestartTextRect := this.RestartText.GetLocalBounds()
-	x = (float32(this.Width) - RestartTextRect.Width) / 2
-	this.RestartText.SetPosition(sf.Vector2f{x, 450})
-
-	this.CreditsText, _ = sf.NewText(this.Font)
-	this.CreditsText.SetString(fmt.Sprintf("Created for Ludum Dare 33 Compo by Toni Korpela!"))
-	this.CreditsText.SetCharacterSize(42)
-	this.CreditsText.SetColor(sf.Color{0,0,0,255})
-	CreditsTextRect := this.CreditsText.GetLocalBounds()
-	x = (float32(this.Width) - CreditsTextRect.Width) / 2
-	this.CreditsText.SetPosition(sf.Vector2f{x, 550})
+	this.endStateInit("You were killed by a Father who had a weapon.", black)
 }
 
 func (this *Game) MonsterStateInit() {
-	this.EndTime = time.Now().Unix()
-	this.EndingText, _ = sf.NewText(this.Font)
-	this.EndingText.SetString(fmt.Sprintf("You were such a monster to try and steal child from a mother."))
-	this.EndingText.SetCharacterSize(36)
-	this.EndingText.SetColor(sf.Color{0,0,0,255})
-	EndingTextRect := this.EndingText.GetLocalBounds()
-	x := (float32(this.Width) - EndingTextRect.Width) / 2
-	this.EndingText.SetPosition(sf.Vector2f{x, 250})
-
-	this.EndingPointsText, _ = sf.NewText(this.Font)
-	this.EndingPointsText.SetString(fmt.Sprintf("You collected %v children in %v seconds.", this.ChildsCollected, this.EndTime - this.StartTime))
-	this.EndingPointsText.SetCharacterSize(36)
-	this.EndingPointsText.SetColor(sf.Color{0,0,0,255})
-	EndingPointsTextRect := this.EndingPointsText.GetLocalBounds()
-	x = (float32(this.Width) - EndingPointsTextRect.Width) / 2
-	this.EndingPointsText.SetPosition(sf.Vector2f{x, 350})
-	
-	this.RestartText, _ = sf.NewText(this.Font)
-	this.RestartText.SetString(fmt.Sprintf("Press Enter to restart the game!"))
-	this.RestartText.SetCharacterSize(42)
-	this.RestartText.SetColor(sf.Color{255,0,0,255})
-	RestartTextRect := this.RestartText.GetLocalBounds()
-	x = (float32(this.Width) - RestartTextRect.Width) / 2
-	this.RestartText.SetPosition(sf.Vector2f{x, 450})
-
-	this.CreditsText, _ = sf.NewText(this.Font)
-	this.CreditsText.SetString(fmt.Sprintf("Created for Ludum Dare 33 Compo by Toni Korpela!"))
-	this.CreditsText.SetCharacterSize(42)
-	this.CreditsText.SetColor(sf.Color{0,0,0,255})
-	CreditsTextRect := this.CreditsText.GetLocalBounds()
-	x = (float32(this.Width) - CreditsTextRect.Width) / 2
-	this.CreditsText.SetPosition(sf.Vector2f{x, 550})
+	this.endStateInit("You were such a monster to try and steal child from a mother.", color.RGBA{255, 0, 0, 255})
 }
 
-func (this *Game) Update() {
+func (this *Game) Update() error {
+	if inpututil.IsKeyJustReleased(ebiten.KeyEscape) {
+		return ebiten.Termination
+	}
+	enter := inpututil.IsKeyJustReleased(ebiten.KeyEnter) || inpututil.IsKeyJustReleased(ebiten.KeyNumpadEnter)
+
 	if this.State == 0 {
 		// Opening state
-		for event := this.RenderWindow.PollEvent(); event != nil; event = this.RenderWindow.PollEvent() {
-			switch ev := event.(type) {
-			case sf.EventKeyReleased:
-				if ev.Code == sf.KeyEscape {
-					this.RenderWindow.Close()
-				}
-				if ev.Code == sf.KeyReturn {
-					this.State = 1
-					this.GameStateInit()
-				}
-			case sf.EventClosed:
-				this.RenderWindow.Close()
-			}
+		if enter {
+			this.State = 1
+			this.GameStateInit()
 		}
 	} else if this.State == 1 {
 		// Game state
-		for event := this.RenderWindow.PollEvent(); event != nil; event = this.RenderWindow.PollEvent() {
-			switch ev := event.(type) {
-			case sf.EventKeyReleased:
-				if ev.Code == sf.KeyEscape {
-					this.RenderWindow.Close()
-				}
-			case sf.EventClosed:
-				this.RenderWindow.Close()
-			}
-		}
 		t := time.Now().UnixNano()
-		this.TimeText.SetString(fmt.Sprintf("Collection time: %v", time.Now().Unix() - this.StartTime))
-		if t > this.LastEnemyGenerated + this.EnemyGenerationSpeed {
-			this.LastEnemyGenerated = t 
+		this.TimeText.Str = fmt.Sprintf("Collection time: %v", time.Now().Unix()-this.StartTime)
+		if t > this.LastEnemyGenerated+this.EnemyGenerationSpeed {
+			this.LastEnemyGenerated = t
 			this.EnemyList = append(this.EnemyList, NewEnemy(int(this.Width), this.Textures))
 		}
-		if sf.KeyboardIsKeyPressed(sf.KeyLeft) == true || sf.KeyboardIsKeyPressed(sf.KeyA) == true {
+		if ebiten.IsKeyPressed(ebiten.KeyArrowLeft) || ebiten.IsKeyPressed(ebiten.KeyA) {
 			this.Player.MoveLeft()
 		}
-		if sf.KeyboardIsKeyPressed(sf.KeyUp) == true || sf.KeyboardIsKeyPressed(sf.KeyW) == true  {
+		if ebiten.IsKeyPressed(ebiten.KeyArrowUp) || ebiten.IsKeyPressed(ebiten.KeyW) {
 			this.Player.MoveUp()
 		}
-		if sf.KeyboardIsKeyPressed(sf.KeyRight) == true || sf.KeyboardIsKeyPressed(sf.KeyD) == true {
+		if ebiten.IsKeyPressed(ebiten.KeyArrowRight) || ebiten.IsKeyPressed(ebiten.KeyD) {
 			this.Player.MoveRight()
 		}
-		if sf.KeyboardIsKeyPressed(sf.KeyDown) == true || sf.KeyboardIsKeyPressed(sf.KeyS) == true {
+		if ebiten.IsKeyPressed(ebiten.KeyArrowDown) || ebiten.IsKeyPressed(ebiten.KeyS) {
 			this.Player.MoveDown()
 		}
-		for i := 0; i < len(this.EnemyList); i++  {
+		for i := 0; i < len(this.EnemyList); i++ {
 			if this.EnemyList[i].Collision(this.Player) == true {
 				if this.EnemyList[i].GetHasFather() == true && this.EnemyList[i].GetHasMother() == false {
 					if this.EnemyList[i].GetFatherHasWeapon() == false {
-						this.ChildStolen.Play()
-						this.ChildsCollected += 1;
-						this.ChildsCollectedText.SetString(fmt.Sprintf("Childs Collected: %v", this.ChildsCollected))
+						restart(this.ChildStolen)
+						this.ChildsCollected += 1
+						this.ChildsCollectedText.Str = fmt.Sprintf("Childs Collected: %v", this.ChildsCollected)
 						this.EnemyList = append(this.EnemyList[:i], this.EnemyList[i+1:]...)
-						i--;
+						i--
 					} else if this.EnemyList[i].GetFatherHasWeapon() == true {
 						// End the game, because the Child Service worker was killed.
 						this.KilledStateInit()
@@ -233,7 +231,7 @@ func (this *Game) Update() {
 				this.EnemyList[i].MoveDown()
 				if this.EnemyList[i].Destroy(int(this.Height)) == true {
 					this.EnemyList = append(this.EnemyList[:i], this.EnemyList[i+1:]...)
-					i--;
+					i--
 				}
 			}
 		}
@@ -252,61 +250,37 @@ func (this *Game) Update() {
 		} else if this.ChildsCollected > 300 {
 			this.EnemyGenerationSpeed = 25000000
 		}
-	} else if this.State == 2 {
-		// ending when killed state
-		this.Music.Stop()
-		for event := this.RenderWindow.PollEvent(); event != nil; event = this.RenderWindow.PollEvent() {
-			switch ev := event.(type) {
-			case sf.EventKeyReleased:
-				if ev.Code == sf.KeyEscape {
-					this.RenderWindow.Close()
-				}
-				if ev.Code == sf.KeyReturn {
-					this.GameStateInit()
-					this.State = 0
-				}
-			case sf.EventClosed:
-				this.RenderWindow.Close()
-			}
-		}
-	} else if this.State == 3 {
-		// ending when called a monster state
-		this.Music.Stop()
-		for event := this.RenderWindow.PollEvent(); event != nil; event = this.RenderWindow.PollEvent() {
-			switch ev := event.(type) {
-			case sf.EventKeyReleased:
-				if ev.Code == sf.KeyEscape {
-					this.RenderWindow.Close()
-				}
-				if ev.Code == sf.KeyReturn {
-					this.GameStateInit()
-					this.State = 0
-				}
-			case sf.EventClosed:
-				this.RenderWindow.Close()
-			}
-		}
-	}
-}
-
-func (this *Game) Draw() {
-	this.RenderWindow.Clear(sf.Color{44, 176, 55, 255})
-	if this.State == 0 {
-		this.WelcomeText.Draw(this.RenderWindow, sf.DefaultRenderStates())
-		this.PlayText.Draw(this.RenderWindow, sf.DefaultRenderStates())
-	} else if this.State == 1 {
-		for Enemy, _ := range this.EnemyList {
-			this.EnemyList[Enemy].Draw(this.RenderWindow, sf.DefaultRenderStates())
-		}
-		this.Player.Draw(this.RenderWindow, sf.DefaultRenderStates())
-		this.ChildsCollectedText.Draw(this.RenderWindow, sf.DefaultRenderStates())
-		this.TimeText.Draw(this.RenderWindow, sf.DefaultRenderStates())
 	} else if this.State == 2 || this.State == 3 {
-		this.EndingText.Draw(this.RenderWindow, sf.DefaultRenderStates())
-		this.EndingPointsText.Draw(this.RenderWindow, sf.DefaultRenderStates())
-		this.RestartText.Draw(this.RenderWindow, sf.DefaultRenderStates())
-		this.CreditsText.Draw(this.RenderWindow, sf.DefaultRenderStates())
+		// Ending states (killed / called a monster)
+		this.Music.Pause()
+		if enter {
+			this.State = 0
+		}
 	}
-	this.RenderWindow.Display()
+	return nil
 }
 
+func (this *Game) Draw(screen *ebiten.Image) {
+	screen.Fill(color.RGBA{44, 176, 55, 255})
+	if this.State == 0 {
+		this.WelcomeText.Draw(screen)
+		this.PlayText.Draw(screen)
+	} else if this.State == 1 {
+		for _, Enemy := range this.EnemyList {
+			Enemy.Draw(screen)
+		}
+		this.Player.Draw(screen)
+		this.ChildsCollectedText.Draw(screen)
+		this.TimeText.Draw(screen)
+	} else if this.State == 2 || this.State == 3 {
+		this.EndingText.Draw(screen)
+		this.EndingPointsText.Draw(screen)
+		this.RestartText.Draw(screen)
+		this.CreditsText.Draw(screen)
+	}
+}
+
+// Layout keeps the original 1920x1080 world and scales it to the window.
+func (this *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
+	return int(this.Width), int(this.Height)
+}
